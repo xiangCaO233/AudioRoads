@@ -1,5 +1,7 @@
 #include "AppWindow.h"
 
+#include "SystemFont.h"
+
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -56,7 +58,31 @@ std::expected<void, std::string> AppWindow::initialize()
     auto& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigDpiScaleFonts = true;
     ImGui::StyleColorsDark();
+
+    // 首个字体源成为默认 UI 字体，其余系统回退源只补充缺失字形。ImGui 1.92
+    // 的动态字体图集会按实际文本请求字形，无需预烘焙完整 CJK 范围。
+    bool fontLoaded{};
+    if ( auto systemFonts = resolveSystemFontFaces(); systemFonts ) {
+        for ( const auto& face : *systemFonts ) {
+            ImFontConfig config;
+            config.FontNo    = face.faceIndex;
+            config.MergeMode = fontLoaded;
+            if ( io.Fonts->AddFontFromFileTTF(
+                     face.path.c_str(), 0.0F, &config) != nullptr ) {
+                fontLoaded = true;
+            }
+        }
+    }
+    if ( !fontLoaded ) io.Fonts->AddFontDefaultVector();
+
+    auto& style        = ImGui::GetStyle();
+    style.FontSizeBase = 16.0F;
+    float xScale{ 1.0F };
+    float yScale{ 1.0F };
+    glfwGetWindowContentScale(m_window, &xScale, &yScale);
+    style.FontScaleDpi = xScale > yScale ? xScale : yScale;
 
     if ( !ImGui_ImplGlfw_InitForOpenGL(m_window, true) ) {
         ImGui::DestroyContext();

@@ -34,6 +34,7 @@ cmake -S . -B build -G Ninja \
 ```
 
 Linux 还需要 CMake、Ninja、Clang、OpenGL/Wayland 或 X11 开发文件以及
+Fontconfig 开发文件（Debian 上为 `libfontconfig1-dev`）和
 `libpipewire-0.3-dev`。如果构建机只需要检查 Core/UI，可以显式添加
 `-DAUDIOROADS_ENABLE_PIPEWIRE=OFF`；该模式会在客户端内明确显示后端不可用，
 不能用于产品构建。
