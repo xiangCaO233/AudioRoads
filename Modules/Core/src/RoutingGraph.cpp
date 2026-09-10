@@ -7,66 +7,66 @@
 namespace AudioRoads::Core
 {
 
-void RoutingGraph::replaceDevices(std::vector<AudioDevice> devices)
+void RoutingGraph::replaceEndpoints(AudioEndpointSnapshot snapshot)
 {
-    // 设备列表只在用户刷新或后端通知时整体替换，保持读侧接口简单稳定。
-    // 路由只保存稳定设备 ID，因此端点暂时消失时仍保留配置，等待同 ID 恢复。
-    // 该移动同时令旧 devices 元素地址失效，findDevice 返回值不得跨此调用保存。
-    m_devices = std::move(devices);
+    // 两类容器来自同一次后端枚举，连续移动提交可防止 UI 混用两代快照。
+    // 路由只保存 ID，因此端点暂时消失时仍保留用户配置。
+    m_sources = std::move(snapshot.sources);
+    m_targets = std::move(snapshot.targets);
 }
 
-const std::vector<AudioDevice>& RoutingGraph::devices() const noexcept
+const std::vector<AudioSource>& RoutingGraph::sources() const noexcept
 {
-    return m_devices;
+    // 控制面调用者借用容器；不复制可避免 UI 每帧重复分配端点字符串。
+    return m_sources;
+}
+
+const std::vector<AudioTarget>& RoutingGraph::targets() const noexcept
+{
+    // 与 sources 属于同一代快照，只有 replaceEndpoints 才会整体替换其存储。
+    return m_targets;
 }
 
 const std::vector<AudioRoute>& RoutingGraph::routes() const noexcept
 {
+    // 路由顺序同时作为 UI 稳定展示顺序，不按在线状态或增益隐式重排。
     return m_routes;
 }
 
 std::expected<RouteId, RoutingError> RoutingGraph::createRoute(
-    std::string sourceDeviceId, std::string sinkDeviceId, float gain)
+    std::string sourceId, std::string targetId, float gain)
 {
-    // 所有约束都在修改容器前验证，使失败不消耗 ID，也不留下半成品路由。
-    // 增益同时拒绝 NaN/Inf 和范围外有限值，避免异常浮点进入后续实时快照。
+    // 所有约束都在修改容器前验证，失败不会留下半成品或消耗路由 ID。
     if ( !std::isfinite(gain) || gain < 0.0F || gain > 4.0F ) {
         return std::unexpected(RoutingError::InvalidGain);
     }
 
-    const auto* source = findDevice(sourceDeviceId);
-    // 先区分端点缺失和方向错误，UI 才能给出具体的可恢复原因。
-    if ( source == nullptr )
+    if ( findSource(sourceId) == nullptr ) {
+        // 空 ID 也通过普通未找到路径处理，避免为表现相同的输入增加特殊错误。
         return std::unexpected(RoutingError::SourceNotFound);
-    if ( !canCapture(*source) ) {
-        return std::unexpected(RoutingError::SourceCannotCapture);
+    }
+    if ( findTarget(targetId) == nullptr ) {
+        // 来源已验证但尚未修改任何成员，目标失败仍保持事务性。
+        return std::unexpected(RoutingError::TargetNotFound);
     }
 
-    const auto* sink = findDevice(sinkDeviceId);
-    // 目标校验与源校验对称，但保留独立错误枚举供调用方定位错误一端。
-    if ( sink == nullptr ) return std::unexpected(RoutingError::SinkNotFound);
-    if ( !canRender(*sink) ) {
-        return std::unexpected(RoutingError::SinkCannotRender);
-    }
-
-    // 源、目标组成有序对；即使双工设备可处于任一端，路由方向仍不可互换。
-    // 一个端点对只保留一条路由，增益和静音通过 updateRoute 修改。
+    // 来源与目标组成有序对；同一应用可路由到多个目标，同一目标也可接收多源。
     const auto duplicate =
         std::ranges::find_if(m_routes, [&](const AudioRoute& route) {
-            return route.sourceDeviceId == sourceDeviceId &&
-                   route.sinkDeviceId == sinkDeviceId;
+            return route.sourceId == sourceId && route.targetId == targetId;
         });
     if ( duplicate != m_routes.end() ) {
         return std::unexpected(RoutingError::DuplicateRoute);
     }
 
     const auto id = m_nextRouteId++;
-    // ID 只在所有验证通过后递增，失败重试不会产生无意义缺口；零永不发放。
-    m_routes.push_back(AudioRoute{ .id             = id,
-                                   .sourceDeviceId = std::move(sourceDeviceId),
-                                   .sinkDeviceId   = std::move(sinkDeviceId),
-                                   .gain           = gain,
-                                   .muted          = false });
+    // ID 在整个进程寿命内不复用，删除旧边后 UI 的延迟动作不会命中新边。
+    // 实际溢出在产品寿命内不可达；零作为 UI 删除动作哨兵始终保留。
+    m_routes.push_back(AudioRoute{ .id       = id,
+                                   .sourceId = std::move(sourceId),
+                                   .targetId = std::move(targetId),
+                                   .gain     = gain,
+                                   .muted    = false });
     return id;
 }
 
@@ -74,57 +74,58 @@ std::expected<void, RoutingError> RoutingGraph::updateRoute(RouteId id,
                                                             float   gain,
                                                             bool    muted)
 {
-    // update 只修改运行参数；端点变化必须重新创建，以复用完整端点校验。
-    // 与 createRoute 共享同一数值范围，防止不同入口产生互不兼容的路由状态。
+    // create/update 共用同一数值范围，避免非 UI 入口产生实时侧无法处理的状态。
     if ( !std::isfinite(gain) || gain < 0.0F || gain > 4.0F ) {
         return std::unexpected(RoutingError::InvalidGain);
     }
 
     const auto route = std::ranges::find(m_routes, id, &AudioRoute::id);
     if ( route == m_routes.end() ) {
-        // 热插拔不会删除路由，但显式删除后对旧 ID 的更新必须可观测地失败。
+        // 热插拔不删除路由，因此找不到只可能来自已删除或无效的路由 ID。
         return std::unexpected(RoutingError::RouteNotFound);
     }
 
+    // 端点不可通过 update 改写，确保所有连接变化重新经过完整存在性校验。
     route->gain  = gain;
     route->muted = muted;
-    // 两个运行参数在查找成功后连续提交；当前控制面由单线程事件循环串行调用。
     return {};
 }
 
 bool RoutingGraph::removeRoute(RouteId id) noexcept
 {
-    // erase_if 将“查找并删除”合并为一次遍历，尺寸变化即为调用结果。
     const auto oldSize = m_routes.size();
+    // erase_if 保留其他路由的相对顺序；ID 唯一性保证最多删除一个元素。
     std::erase_if(m_routes,
                   [id](const AudioRoute& route) { return route.id == id; });
-    // 不把“未找到”当异常，布尔返回让 UI 和未来配置同步代码自行决定策略。
     return m_routes.size() != oldSize;
 }
 
-const AudioDevice* RoutingGraph::findDevice(
+const AudioSource* RoutingGraph::findSource(
     const std::string& id) const noexcept
 {
-    // 返回非拥有指针；下一次 replaceDevices 会使它失效，调用方不可跨刷新缓存。
-    const auto device = std::ranges::find(m_devices, id, &AudioDevice::id);
-    // 投影查找只比较稳定 ID，不依赖可变展示名、默认标志或格式快照。
-    return device == m_devices.end() ? nullptr : &*device;
+    // 返回借用指针，下一次完整快照替换会使地址失效。
+    const auto source = std::ranges::find(m_sources, id, &AudioSource::id);
+    return source == m_sources.end() ? nullptr : &*source;
+}
+
+const AudioTarget* RoutingGraph::findTarget(
+    const std::string& id) const noexcept
+{
+    // 目标类别前缀属于 ID 本身，因此无需在查找后再次判断目标 kind。
+    const auto target = std::ranges::find(m_targets, id, &AudioTarget::id);
+    return target == m_targets.end() ? nullptr : &*target;
 }
 
 const char* routingErrorMessage(RoutingError error) noexcept
 {
-    // 文本仅用于当前 UI 展示，不是稳定序列化格式；持久化应保存枚举映射值。
-    // switch 不设 default，让编译器告警能提示新增枚举值遗漏；末尾处理损坏值。
+    // 文本只面向当前 UI，不作为序列化协议；持久化状态必须保存枚举或业务字段。
     switch ( error ) {
-    case RoutingError::SourceNotFound: return "输入设备不存在";
-    case RoutingError::SinkNotFound: return "输出设备不存在";
-    case RoutingError::SourceCannotCapture: return "源设备不支持采集";
-    case RoutingError::SinkCannotRender: return "目标设备不支持播放";
-    case RoutingError::DuplicateRoute: return "该设备对已经存在路由";
+    case RoutingError::SourceNotFound: return "音频来源不存在";
+    case RoutingError::TargetNotFound: return "音频目标不存在";
+    case RoutingError::DuplicateRoute: return "该来源和目标之间已经存在路由";
     case RoutingError::RouteNotFound: return "路由不存在";
     case RoutingError::InvalidGain: return "增益必须位于 0.0 到 4.0";
     }
-    // 防御来自越界转换的枚举值，同时保持函数 noexcept 且始终有可展示文本。
     return "未知路由错误";
 }
 

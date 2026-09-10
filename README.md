@@ -1,23 +1,26 @@
 # AudioRoads
 
 AudioRoads 是一款面向 Windows、现代 Linux（PipeWire）和 macOS 的桌面音频
-路由客户端。它把物理声卡、虚拟设备与系统端点统一为设备快照，让用户在图形
-界面中创建 `输入 -> 增益/静音 -> 输出` 路由，并为后续多路实时混音、重采样和
-通道映射提供稳定边界。
+路由客户端。它把录音设备和单个桌面应用的播放流统一为 source，把物理播放
+设备和系统可见虚拟麦克风统一为 target。用户在节点画布中点击两个方块即可
+连线；多条连接汇入同一目标时完成混音，每条连接独立控制增益和静音。
 
-当前仓库已经具备可运行的客户端外壳、三平台原生设备枚举、路由编辑 UI、无分配
-混音内核和基础测试。实际设备流的打开、跨时钟域缓冲和实时路由执行仍是下一阶段，
-因此当前版本不会宣称已经把创建的路由送入声卡。
+当前仓库已经具备可运行的客户端外壳、三平台物理端点枚举、应用输出来源发现、
+节点连线 UI、无分配混音内核及无锁 SPSC 音频缓冲。实际平台流的打开、重采样、
+虚拟端点组件和实时路由调度仍在实现中，因此当前版本不会宣称画布连接已经送入
+声卡或被其他软件识别为麦克风。
 
 ## 平台后端
 
 | 平台 | 原生接口 | 当前能力 |
 | --- | --- | --- |
-| Windows | MMDevice / WASAPI | 活动输入输出端点、默认端点、共享格式发现 |
-| Linux | PipeWire 0.3 | registry 音频 Source/Sink 节点发现 |
-| macOS | CoreAudio HAL | 设备 UID、输入输出通道、默认设备和采样率发现 |
+| Windows | MMDevice / WASAPI | 活动设备及音频会话发现；后续用 application loopback 捕获进程树 |
+| Linux | PipeWire 0.3 | 设备节点及 `Stream/Output/Audio` 应用流发现 |
+| macOS | CoreAudio HAL | 设备及运行中输出进程发现；要求 macOS 14.2+ |
 
-三个后端都只向上层暴露 `AudioDevice` 值类型；原生句柄不会进入 Core 或 UI。
+三个后端都只向上层暴露 `AudioSource`、`AudioTarget` 值类型；原生句柄不会进入
+Core 或 UI。系统虚拟麦克风的组件边界和签名策略见
+[平台端点组件](docs/platform-components.md)。
 
 ## 构建
 
@@ -67,7 +70,7 @@ ctest --test-dir build --output-on-failure
     └── <package>                   # Git submodule
 ```
 
-`SOURCES_BUILD` 是唯一来源开关，默认值为 `OFF`。关闭时缺少预编译头文件或库会
+`SOURCES_BUILD` 是唯一来源开关，默认值为 `ON`。关闭时缺少预编译头文件或库会
 直接配置失败，不会偷偷回退到源码；开启时从 `3rdpty/sources` 构建。两条路径都
 导出同名 `3rd_*` target，业务模块不感知来源差异。
 

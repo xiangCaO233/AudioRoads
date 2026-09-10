@@ -23,9 +23,8 @@ public:
         return "PipeWire disabled";
     }
 
-    [[nodiscard]] std::expected<std::vector<Core::AudioDevice>,
-                                AudioBackendError>
-    enumerateDevices() override
+    [[nodiscard]] std::expected<Core::AudioEndpointSnapshot, AudioBackendError>
+    enumerateEndpoints() override
     {
         // 不返回空成功：空集合可能被误解为“服务正常但没有设备”，必须让构建
         // 配置问题沿标准错误通道抵达 UI。

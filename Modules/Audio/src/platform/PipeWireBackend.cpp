@@ -5,6 +5,7 @@
 
 #include <spa/utils/dict.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -22,7 +23,7 @@ namespace
 
 /// @brief 单次 PipeWire registry round-trip 使用的临时状态。
 ///
-/// 该对象由 enumerateDevices 的栈帧拥有，地址作为 userData 借给 listener。
+/// 该对象由 enumerateEndpoints 的栈帧拥有，地址作为 userData 借给 listener。
 /// 只有主循环退出且 listener 全部移除后才能销毁，因此回调无需额外同步。
 /// 它只收集控制面快照，不得被音频处理线程观察或持有。
 struct EnumerationState {
@@ -32,10 +33,11 @@ struct EnumerationState {
     /// @brief 用于匹配 core.done 回调的同步序号。
     int syncSequence{};
 
-    /// @brief 完整 registry 快照转换出的音频设备。
-    std::vector<Core::AudioDevice> devices;
+    /// @brief 完整 registry 事件转换出的来源与目标快照。
+    Core::AudioEndpointSnapshot endpoints;
 
     /// @brief 服务端异步错误；非空时枚举失败。
+    /// @note 由同一 pw_main_loop 线程写入，枚举返回后才由控制线程读取。
     std::string error;
 };
 
@@ -44,6 +46,7 @@ struct EnumerationState {
 /// 返回的 string_view 借用 spa_dict 内存，只允许在当前 registry 回调内读取。
 /// 需要进入 Core DTO 的字段必须在回调返回前复制成拥有型字符串。
 /// @return 属性缺失、字典为空时均返回空视图，调用方负责选择降级语义。
+/// @warning 返回值不能保存到 DTO、异步任务或下一次 PipeWire 回调。
 [[nodiscard]] std::string_view property(const spa_dict* properties,
                                         const char*     key) noexcept
 {
@@ -56,22 +59,33 @@ struct EnumerationState {
 
 /// @brief 将 PipeWire 字符串属性转换为无符号数，非法值按未知处理。
 ///
-/// PipeWire 的通道数和采样率属性并非每个节点都存在。零值在 AudioDevice 中
+/// PipeWire 的通道数和采样率属性并非每个节点都存在。零值在端点 DTO 中
 /// 表示未知，避免因单个展示属性格式异常而丢弃整个可用端点。
+/// @param text 当前 registry 回调内借用的十进制属性。
+/// @return 完整解析的非负值；缺失、溢出或含尾随字符时为零。
 [[nodiscard]] std::uint32_t parseUnsigned(std::string_view text) noexcept
 {
+    // 缺失属性返回空视图；先短路可避免把空指针交给 from_chars 的范围契约。
+    if ( text.empty() ) return 0U;
     std::uint32_t value{};
     // from_chars 不使用 locale 且不抛异常，适合平台属性到标量 DTO 的边界。
     const auto result =
         std::from_chars(text.data(), text.data() + text.size(), value);
-    return result.ec == std::errc{} ? value : 0U;
+    // 必须同时消费完整字符串，避免把 "48000-invalid" 当成合法采样率。
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size()
+               ? value
+               : 0U;
 }
 
-/// @brief 接收 registry global 并筛选 Audio/Source、Audio/Sink 节点。
+/// @brief 接收 registry global 并分类设备端点与桌面应用输出流。
 ///
-/// registry 还包含客户端流、过滤器和 monitor 等内部节点，它们不能作为用户
-/// 可打开的端点。回调只复制稳定标识、展示名和基础能力，不保留任何原生代理。
+/// Audio/Source 和 Audio/Sink 分别成为设备来源与播放目标；
+/// Stream/Output/Audio 按应用身份聚合为应用输出来源。其他过滤器和 monitor
+/// 等内部节点不暴露给用户。回调不保留任何原生代理。
 /// @param userData 指向本次枚举栈上的 EnumerationState，listener 移除前有效。
+/// @param id 当前远端连接内的临时 global ID，只在缺少稳定属性时降级使用。
+/// @param type global 接口类型；只有 Node 进入端点分类。
+/// @param properties 此次回调借用的 SPA 字典，返回后全部视图失效。
 void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
                       const char*     type, std::uint32_t,
                       const spa_dict* properties)
@@ -82,14 +96,12 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
         return;
     }
 
-    const auto       mediaClass = property(properties, PW_KEY_MEDIA_CLASS);
-    Core::DeviceFlow flow{};
-    if ( mediaClass == "Audio/Source" ) {
-        flow = Core::DeviceFlow::Input;
-    } else if ( mediaClass == "Audio/Sink" ) {
-        flow = Core::DeviceFlow::Output;
-    } else {
-        // Stream、filter 和 monitor 等节点不是用户可直接打开的硬件端点。
+    const auto mediaClass          = property(properties, PW_KEY_MEDIA_CLASS);
+    const auto isDeviceInput       = mediaClass == "Audio/Source";
+    const auto isDeviceOutput      = mediaClass == "Audio/Sink";
+    const auto isApplicationOutput = mediaClass == "Stream/Output/Audio";
+    if ( !isDeviceInput && !isDeviceOutput && !isApplicationOutput ) {
+        // Filter、monitor 和其他内部节点不是本阶段可直接路由的用户端点。
         return;
     }
 
@@ -100,10 +112,16 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
     const auto description = property(properties, PW_KEY_NODE_DESCRIPTION);
     const auto nick        = property(properties, PW_KEY_NODE_NICK);
     const auto nodeName    = property(properties, PW_KEY_NODE_NAME);
+    const auto appName     = property(properties, PW_KEY_APP_NAME);
+    const auto appBinary   = property(properties, PW_KEY_APP_PROCESS_BINARY);
+    const auto processId =
+        parseUnsigned(property(properties, PW_KEY_APP_PROCESS_ID));
 
     std::string displayName;
     // 可读名称逐级降级；最后使用本次 registry ID，保证 UI 永远有非空标签。
-    if ( !description.empty() ) {
+    if ( isApplicationOutput && !appName.empty() ) {
+        displayName.assign(appName);
+    } else if ( !description.empty() ) {
         displayName.assign(description);
     } else if ( !nick.empty() ) {
         displayName.assign(nick);
@@ -116,19 +134,74 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
     // PipeWire 属性是借用的 spa_dict 字符串，离开回调前必须全部复制或解析。
     const auto channels = parseUnsigned(property(properties, "audio.channels"));
     const auto rate     = parseUnsigned(property(properties, "audio.rate"));
-    const auto isInput  = flow == Core::DeviceFlow::Input;
-    // Source/Sink 分别只填写一个方向的通道数，零表示另一方向不具备能力。
-    state.devices.push_back(Core::AudioDevice{
-        .id = "pipewire:" +
-              (stableId.empty() ? std::to_string(id) : std::string{ stableId }),
-        .name           = std::move(displayName),
-        .backend        = "PipeWire",
-        .flow           = flow,
-        .inputChannels  = isInput ? channels : 0U,
-        .outputChannels = isInput ? 0U : channels,
-        .sampleRate     = rate,
-        // 默认端点需要 PipeWire metadata；尚未接入时明确保持 false，不猜测。
-        .isDefault = false,
+    const auto nativeId =
+        stableId.empty() ? std::to_string(id) : std::string{ stableId };
+
+    if ( isDeviceInput ) {
+        // PipeWire 的 Audio/Source 从图节点向客户端提供数据，对路由引擎是
+        // source。
+        state.endpoints.sources.push_back(Core::AudioSource{
+            .id         = "pipewire:device-input:" + nativeId,
+            .name       = std::move(displayName),
+            .backend    = "PipeWire",
+            .kind       = Core::AudioSourceKind::DeviceInput,
+            .channels   = channels,
+            .sampleRate = rate,
+            // 默认端点需要 metadata；尚未接入时明确保持 false，不猜测。
+            .isDefault   = false,
+            .application = std::nullopt,
+        });
+        return;
+    }
+
+    if ( isDeviceOutput ) {
+        // Audio/Sink 接收客户端播放数据，对路由引擎是
+        // target；名称相似也不合并。
+        state.endpoints.targets.push_back(Core::AudioTarget{
+            .id         = "pipewire:device-output:" + nativeId,
+            .name       = std::move(displayName),
+            .backend    = "PipeWire",
+            .kind       = Core::AudioTargetKind::DeviceOutput,
+            .channels   = channels,
+            .sampleRate = rate,
+            .isDefault  = false,
+        });
+        return;
+    }
+
+    // 同一应用可创建多条 PipeWire stream。路由选择按 binary/name 聚合，未来
+    // 建流时由后端把当前匹配节点共同接入，而不是让用户逐条选择短生命周期流。
+    const auto applicationKey = !appBinary.empty() ? std::string{ appBinary }
+                                : !appName.empty() ? std::string{ appName }
+                                                   : nativeId;
+    // 类别前缀把应用流与同名物理设备隔离，也给后续开流分派提供无歧义入口。
+    const auto sourceId  = "pipewire:application:" + applicationKey;
+    const auto duplicate = std::ranges::find(
+        state.endpoints.sources, sourceId, &Core::AudioSource::id);
+    if ( duplicate != state.endpoints.sources.end() ) {
+        // 多进程应用及同一进程的多条 stream 共用一个 UI 来源；PID 仅追加一次。
+        auto& processIds = duplicate->application->processIds;
+        if ( processId != 0 &&
+             std::ranges::find(processIds, processId) == processIds.end() ) {
+            processIds.push_back(processId);
+        }
+        return;
+    }
+
+    state.endpoints.sources.push_back(Core::AudioSource{
+        .id         = sourceId,
+        .name       = std::move(displayName),
+        .backend    = "PipeWire",
+        .kind       = Core::AudioSourceKind::ApplicationOutput,
+        .channels   = channels,
+        .sampleRate = rate,
+        .isDefault  = false,
+        .application =
+            Core::ApplicationIdentity{
+                .processIds = processId == 0
+                                  ? std::vector<std::uint64_t>{}
+                                  : std::vector<std::uint64_t>{ processId },
+                .stableId   = applicationKey },
     });
 }
 
@@ -136,11 +209,14 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
 ///
 /// PipeWire 可能同时发送其他 done，只有 core 自身且序号匹配的事件才是本次
 /// 快照边界；过早退出会产生随机缺失设备的部分快照。
+/// @param userData 当前同步轮次的 EnumerationState。
+/// @param id 发出 done 的代理 ID，必须是 PW_ID_CORE。
+/// @param sequence 服务端回送的序号，必须匹配本轮 pw_core_sync。
 void onCoreDone(void* userData, std::uint32_t id, int sequence)
 {
     auto& state = *static_cast<EnumerationState*>(userData);
     if ( id == PW_ID_CORE && sequence == state.syncSequence ) {
-        // 退出只结束本次同步等待，实际对象销毁由 enumerateDevices
+        // 退出只结束本次同步等待，实际对象销毁由 enumerateEndpoints
         // 统一逆序执行。
         pw_main_loop_quit(state.loop);
     }
@@ -149,7 +225,9 @@ void onCoreDone(void* userData, std::uint32_t id, int sequence)
 /// @brief 捕获连接级错误并停止等待，避免控制面永久阻塞。
 ///
 /// 错误回调可能早于预期 done 到达，因此先复制服务端文本，再主动结束主循环。
-/// enumerateDevices 在资源清理完成后把该文本转换为 AudioBackendError。
+/// enumerateEndpoints 在资源清理完成后把该文本转换为 AudioBackendError。
+/// @param result PipeWire 负 errno 风格结果，原值进入诊断文本。
+/// @param message 只在当前回调内有效的可空服务端字符串。
 void onCoreError(void* userData, std::uint32_t, int, int result,
                  const char* message)
 {
@@ -183,13 +261,13 @@ public:
         return "PipeWire";
     }
 
-    [[nodiscard]] std::expected<std::vector<Core::AudioDevice>,
-                                AudioBackendError>
-    enumerateDevices() override;
+    /// @brief 完成一次 registry 同步边界内的来源与目标发现。
+    [[nodiscard]] std::expected<Core::AudioEndpointSnapshot, AudioBackendError>
+    enumerateEndpoints() override;
 };
 
-std::expected<std::vector<Core::AudioDevice>, AudioBackendError>
-PipeWireBackend::enumerateDevices()
+std::expected<Core::AudioEndpointSnapshot, AudioBackendError>
+PipeWireBackend::enumerateEndpoints()
 {
     // 每次刷新使用独立对象树，调用结束后不缓存任何 pw_proxy 或 spa 指针。
     // 早退分支按已成功创建资源的逆序释放；后续若增加资源需保持同一不变量。
@@ -201,6 +279,7 @@ PipeWireBackend::enumerateDevices()
     }
 
     auto* context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
+    // context 借用 loop 的底层 pw_loop，销毁顺序必须始终先 context 后 loop。
     if ( context == nullptr ) {
         // context 尚未建立时只需回收 loop，不能调用依赖 context 的清理函数。
         pw_main_loop_destroy(loop);
@@ -232,10 +311,11 @@ PipeWireBackend::enumerateDevices()
     // state 必须声明在 hooks 之前并活到清理结束，确保所有 listener 的 userData
     // 在可能发生回调的整个期间保持有效。
     EnumerationState state{
-        .loop = loop, .syncSequence = 0, .devices = {}, .error = {}
+        .loop = loop, .syncSequence = 0, .endpoints = {}, .error = {}
     };
-    spa_hook           registryListener{};
-    spa_hook           coreListener{};
+    spa_hook registryListener{};
+    spa_hook coreListener{};
+    // events 结构必须零初始化，未使用函数指针保持空值而不是未定义字节。
     pw_registry_events registryEvents{};
     registryEvents.version = PW_VERSION_REGISTRY_EVENTS;
     registryEvents.global  = onRegistryGlobal;
@@ -249,6 +329,7 @@ PipeWireBackend::enumerateDevices()
     pw_registry_add_listener(
         registry, &registryListener, &registryEvents, &state);
     pw_core_add_listener(core, &coreListener, &coreEvents, &state);
+    // listener 完成注册后再发 sync，保证快照边界覆盖所有初始 global 事件。
     // sync 序号是快照边界：匹配的 done 到达时，此前的 global 事件均已分发。
     state.syncSequence = pw_core_sync(core, PW_ID_CORE, 0);
     if ( state.syncSequence < 0 ) {
@@ -263,6 +344,7 @@ PipeWireBackend::enumerateDevices()
     // 监听器必须先于其代理和 context 移除，避免销毁阶段回调悬空状态。
     spa_hook_remove(&coreListener);
     spa_hook_remove(&registryListener);
+    // registry 是从 core 取得的 proxy，父 core 断开之前显式释放其代理引用。
     // listener 移除后 userData 不再被访问，随后才可销毁代理及其父对象。
     pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
     pw_core_disconnect(core);
@@ -276,7 +358,8 @@ PipeWireBackend::enumerateDevices()
                                .message   = std::move(state.error) });
     }
     // 每个 DTO 都拥有自身字符串；移动容器后不依赖已销毁的 registry 状态。
-    return std::move(state.devices);
+    // 此时 listener 已移除且所有原生对象已销毁，返回值只包含 Core 值类型。
+    return std::move(state.endpoints);
 }
 
 }  // namespace

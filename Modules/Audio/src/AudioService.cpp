@@ -16,7 +16,7 @@ AudioService::AudioService(std::unique_ptr<IAudioBackend> backend)
     // unique_ptr 明确后端由服务独占；注入路径也允许测试构造空值验证失败契约。
 }
 
-std::expected<void, AudioBackendError> AudioService::refreshDevices()
+std::expected<void, AudioBackendError> AudioService::refreshEndpoints()
 {
     // 注入构造允许测试传入空后端；在解引用前把组装错误转成普通控制面错误。
     if ( !m_backend ) {
@@ -25,13 +25,13 @@ std::expected<void, AudioBackendError> AudioService::refreshDevices()
     }
 
     // 枚举可能同步访问平台服务，只能由 Application 的低频控制面触发。
-    auto devices = m_backend->enumerateDevices();
+    auto endpoints = m_backend->enumerateEndpoints();
     // 平台错误保留原始操作上下文，上层统一决定展示或记录方式。
-    if ( !devices ) return std::unexpected(std::move(devices.error()));
+    if ( !endpoints ) return std::unexpected(std::move(endpoints.error()));
 
     // 只有完整枚举成功才提交快照，避免瞬时平台错误清空现有工作区。
     // RoutingGraph 负责保留指向暂时离线 ID 的路由，服务不隐式删用户配置。
-    m_routingGraph.replaceDevices(std::move(*devices));
+    m_routingGraph.replaceEndpoints(std::move(*endpoints));
     // 移动避免复制完整字符串集合；后端 expected 随调用结束释放其空容器状态。
     return {};
 }

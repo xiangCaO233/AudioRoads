@@ -3,6 +3,15 @@ cmake_minimum_required(VERSION 3.31)
 # 版本常量在 project() 之前定义，供 target 元数据与独立打包脚本共同使用， 避免生成产物和安装包各自维护版本。
 set(AUDIOROADS_VERSION "0.1.0")
 
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+  # 单应用捕获依赖 macOS 14.2 引入的 Core Audio process tap。只为未显式指定
+  # 部署目标的构建提供产品下限，打包者仍可选择更高版本。 变量必须在 project() 启用 Objective-C 系列语言之前进入缓存，否则
+  # Xcode 和编译器探测可能已经按错误下限生成参数。
+  set(CMAKE_OSX_DEPLOYMENT_TARGET
+      "14.2"
+      CACHE STRING "Minimum macOS version supported by AudioRoads.")
+endif()
+
 # 顶层只建立全局策略和模块装配；具体算法、UI 与平台后端 target 在子目录定义。 Objective-C/Objective-C++ 仅为 Apple
 # framework 互操作启用，其他平台不能被 无谓要求安装对应编译器前端。
 if(APPLE)

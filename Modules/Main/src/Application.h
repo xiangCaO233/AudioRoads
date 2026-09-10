@@ -22,7 +22,7 @@ public:
 private:
     /// @brief 执行低频设备发现并把可恢复错误转换为 UI 状态。
     /// @note 必须在帧提交后调用，避免平台 API 调用穿插在 ImGui 绘制栈中。
-    void refreshDevices();
+    void refreshEndpoints();
 
     /// @brief 平台设备和路由业务服务。
     Audio::AudioService m_audioService;

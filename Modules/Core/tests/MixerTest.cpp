@@ -21,6 +21,7 @@ int main()
         MixInput{ .samples = first, .gain = 1.0F, .muted = false },
         MixInput{ .samples = second, .gain = 1.0F, .muted = false },
     };
+    // input span 全部借用栈数组，mixAudio 返回后没有任何缓冲区所有权需要释放。
     // 两路均为非静音、单位增益，结果只验证求和与最终限幅，不混入其他条件。
     assert(mixAudio(inputs, output).has_value());
     // 成功 expected 先确认契约成立，随后样本断言才具有数值意义。
@@ -39,6 +40,7 @@ int main()
     };
     // output 仍使用四样本所有者，短输入明确制造 SizeMismatch 而非空缓冲特例。
     const auto result = mixAudio(invalid, output);
+    // 校验在任何清零或累加之前完成，失败后 output 仍保持上一轮成功结果。
     // expected 必须携带精确错误枚举，不能把契约错误伪装为成功静音输出。
     assert(!result.has_value());
     assert(result.error() == MixError::SizeMismatch);

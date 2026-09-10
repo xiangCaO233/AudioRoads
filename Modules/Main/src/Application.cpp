@@ -14,7 +14,7 @@ int Application::run()
     if ( !initialized ) return 1;
 
     // 首帧前取得快照；失败只成为可见错误，UI 仍可启动并允许用户再次刷新。
-    refreshDevices();
+    refreshEndpoints();
     while ( !m_window.shouldClose() ) {
         // 窗口关闭是循环唯一终止条件，设备故障不会强制结束可恢复的客户端会话。
         // 每帧严格保持 begin/draw/end 配对，避免动作处理破坏 ImGui 状态栈。
@@ -25,17 +25,17 @@ int Application::run()
         m_window.endFrame();
 
         // 平台枚举可能执行同步 round-trip，只在帧提交后响应显式动作。
-        if ( actions.refreshDevices ) refreshDevices();
+        if ( actions.refreshEndpoints ) refreshEndpoints();
         // 没有动作时循环只处理渲染与输入，不进行隐式周期性平台枚举。
     }
     // 正常关闭仅结束循环；栈上成员随后按视图、窗口、音频服务的逆序销毁。
     return 0;
 }
 
-void Application::refreshDevices()
+void Application::refreshEndpoints()
 {
     // 设备服务负责“完整成功才替换”语义，此处只把结果映射为用户可见状态。
-    auto refreshed = m_audioService.refreshDevices();
+    auto refreshed = m_audioService.refreshEndpoints();
     if ( !refreshed ) {
         // 平台错误是值对象，在本作用域读取后立即复制进视图持久字符串。
         // 保留“操作: 原因”两层上下文，且不让可恢复设备错误改变进程退出码。

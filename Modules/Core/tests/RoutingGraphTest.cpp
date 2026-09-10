@@ -2,64 +2,105 @@
 
 #include <cassert>
 #include <utility>
-#include <vector>
 
-using AudioRoads::Core::AudioDevice;
-using AudioRoads::Core::DeviceFlow;
+using AudioRoads::Core::ApplicationIdentity;
+using AudioRoads::Core::AudioEndpointSnapshot;
+using AudioRoads::Core::AudioSource;
+using AudioRoads::Core::AudioSourceKind;
+using AudioRoads::Core::AudioTarget;
+using AudioRoads::Core::AudioTargetKind;
 using AudioRoads::Core::RoutingError;
 using AudioRoads::Core::RoutingGraph;
 
-/// @brief 覆盖有效路由、重复路由、方向约束和设备热插拔语义。
+/// @brief 覆盖设备/应用来源、播放/麦克风目标及热插拔路由语义。
 int main()
 {
     RoutingGraph graph;
-    // 人工稳定 ID 隔离平台后端，并明确输入、输出能力来自通道方向。
-    graph.replaceDevices(std::vector<AudioDevice>{
-        { .id            = "microphone",
-          .name          = "Microphone",
-          .backend       = "Test",
-          .flow          = DeviceFlow::Input,
-          .inputChannels = 2,
-          .sampleRate    = 48'000 },
-        { .id             = "speakers",
-          .name           = "Speakers",
-          .backend        = "Test",
-          .flow           = DeviceFlow::Output,
-          .outputChannels = 2,
-          .sampleRate     = 48'000 },
-    });
-    // 测试数据不打开真实设备，使控制面不变量在三平台和无音频服务 CI 中确定。
+    // 测试快照同时覆盖两种来源和两种目标，确保图约束不依赖平台设备方向。
+    AudioEndpointSnapshot endpoints{
+        .sources =
+            {
+                AudioSource{ .id         = "device:microphone",
+                             .name       = "Microphone",
+                             .backend    = "Test",
+                             .kind       = AudioSourceKind::DeviceInput,
+                             .channels   = 2,
+                             .sampleRate = 48'000,
+                             .isDefault  = true,
+                             .application = std::nullopt },
+                AudioSource{
+                    .id         = "application:player",
+                    .name       = "Music Player",
+                    .backend    = "Test",
+                    .kind       = AudioSourceKind::ApplicationOutput,
+                    .channels   = 2,
+                    .sampleRate = 48'000,
+                    .application = ApplicationIdentity{
+                        .processIds = { 42 }, .stableId = "music-player" } },
+            },
+        .targets =
+            {
+                AudioTarget{ .id         = "device:speakers",
+                             .name       = "Speakers",
+                             .backend    = "Test",
+                             .kind       = AudioTargetKind::DeviceOutput,
+                             .channels   = 2,
+                             .sampleRate = 48'000,
+                             .isDefault  = true },
+                AudioTarget{ .id         = "virtual:microphone",
+                             .name       = "AudioRoads Microphone",
+                             .backend    = "Test",
+                             .kind       = AudioTargetKind::VirtualMicrophone,
+                             .channels   = 2,
+                             .sampleRate = 48'000 },
+            },
+    };
+    graph.replaceEndpoints(std::move(endpoints));
+    // replace 后快照所有权已进入 graph，后续断言只观察图内拥有型值。
+    assert(graph.sources().size() == 2);
+    assert(graph.targets().size() == 2);
 
-    // 正常设备对创建后应获得非零、可更新的稳定 ID。
-    const auto created = graph.createRoute("microphone", "speakers", 0.75F);
-    assert(created.has_value());
-    assert(*created != 0);
-    // 零由 UI 用作“无删除请求”哨兵，图层不得向真实路由发放该值。
-    assert(graph.routes().size() == 1);
-    // 增益和静音属于同一路由的一次控制面更新，端点 ID 保持不变。
-    assert(graph.updateRoute(*created, 0.5F, true).has_value());
-    assert(graph.routes().front().muted);
-    // 更新不能替换端点，后续重复检查仍应命中原有的有向设备对。
+    // 单个应用输出与物理录音输入使用完全相同的纯数据路由入口。
+    const auto playback =
+        graph.createRoute("application:player", "device:speakers", 0.75F);
+    assert(playback.has_value());
+    assert(*playback != 0);
+    // 第一条路由从应用方块连接播放目标，并保留用户提交的线性增益。
+    assert(graph.routes().front().gain == 0.75F);
 
-    // 重复设备对必须由图层拒绝，而不是交给平台后端制造双重流。
-    const auto duplicate = graph.createRoute("microphone", "speakers");
-    // 重复失败不得插入第二项或消耗一个对外可见的路由对象。
+    // 虚拟麦克风在图内是消费者，系统侧才将其呈现为新的录音设备。
+    const auto microphone =
+        graph.createRoute("device:microphone", "virtual:microphone", 0.5F);
+    assert(microphone.has_value());
+    assert(graph.routes().size() == 2);
+    assert(graph.updateRoute(*microphone, 1.25F, true).has_value());
+    assert(graph.routes().back().muted);
+    // 参数更新不能改变端点 ID，否则会绕过创建时的存在性和重复边校验。
+    assert(graph.routes().back().sourceId == "device:microphone");
+    assert(graph.routes().back().targetId == "virtual:microphone");
+
+    const auto duplicate =
+        graph.createRoute("application:player", "device:speakers");
+    // 重复定义按端点有序对判断，与增益是否不同无关。
     assert(!duplicate.has_value());
     assert(duplicate.error() == RoutingError::DuplicateRoute);
+    // 失败不消耗 ID 或追加半成品，路由数量必须保持不变。
+    assert(graph.routes().size() == 2);
 
-    // 反向端点不是另一条合法路由：输出设备不能作为采集源。
-    const auto reversed = graph.createRoute("speakers", "microphone");
-    assert(!reversed.has_value());
-    // 具体方向错误比笼统“端点不存在”更能证明图层读取了设备能力。
-    assert(reversed.error() == RoutingError::SourceCannotCapture);
+    const auto missingTarget =
+        graph.createRoute("application:player", "missing");
+    assert(!missingTarget.has_value());
+    assert(missingTarget.error() == RoutingError::TargetNotFound);
+    // 来源仍在线不能掩盖目标缺失，错误必须精确指向连接的失败端。
 
-    // 热拔出只更新设备快照；路由配置保留，等待同 ID 设备恢复。
-    graph.replaceDevices({});
-    // 不缓存 findDevice 返回指针跨越该替换；只通过稳定 ID 验证配置仍存在。
-    assert(graph.routes().size() == 1);
-    // 显式删除返回 true 且容器同步变空，区分热拔出与用户删除两种状态转折。
-    assert(graph.removeRoute(*created));
+    // 端点快照消失不删除用户图，稳定 ID 恢复后可由执行层重新接通。
+    graph.replaceEndpoints({});
+    // 空快照只表示所有端点暂时离线，不等价于用户要求清空项目拓扑。
+    assert(graph.routes().size() == 2);
+    // 离线路由仍可通过自身 RouteId 删除，操作不要求两端当前可发现。
+    assert(graph.removeRoute(*playback));
+    assert(graph.removeRoute(*microphone));
     assert(graph.routes().empty());
-    // 容器为空证明删除修改了图，而不只是返回了成功标志。
+    // 删除完毕后图保持可复用，nextRouteId 不回退也不会与旧 UI 动作冲突。
     return 0;
 }

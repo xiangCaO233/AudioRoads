@@ -6,5 +6,6 @@ build/
 .idea/
 release/
 *__pycache__/
+imgui.ini
 
 .DS_Store
