@@ -12,10 +12,12 @@
 - CMake 最低版本为 3.31，稳定语言基线为 C++23；C++26 通过
   `AUDIOROADS_CXX_STANDARD=26` 显式开启。
 - 不使用 CMake Presets。开发构建使用直接的 `cmake -S/-B` 命令。
-- `SOURCES_BUILD` 是第三方来源的唯一开关，默认 `OFF`：`ON` 从
+- `SOURCES_BUILD` 是第三方来源的唯一开关，本仓库默认 `ON`：`ON` 从
   `3rdpty/sources` 构建，`OFF` 只允许 `3rdpty/prebuilts`，不得静默回退。
 - 预编译布局、独立 `Find*.cmake` 和包装 target 必须与当前
   `3rdpty/cmake/modules` 约定保持一致，业务模块不得感知依赖来源。
+- 安装布局和 CPack 配置集中放在 `cmake/` 下的独立脚本；顶层
+  `CMakeLists.txt` 只在产物 target 建立后 `include()`，不内联安装打包细节。
 - 修改后至少执行构建；测试相关修改还需运行
   `ctest --test-dir build --output-on-failure`。
 - 本机构建并行度不超过 `max(1, floor(nproc * 60 / 100))`。
@@ -34,6 +36,20 @@
   预分配缓冲区、稳定 ID/索引及最弱可证明正确的同步。
 - 修改的 C/C++ 文件必须运行仓库 `.clang-format`；自维护 CMake 使用
   `cmake-format`，CMake 注释使用中文。
+
+## 注释质量与统计
+
+- 仓库自维护的 C、C++、头文件和 CMake 注释率不得低于 30%；CMake
+  必须纳入统计，`3rdpty/sources` 上游子模块和生成目录不计入。
+- 统计公式固定为 `comment / (comment + code) * 100%`，使用下列可复现
+  命令，取 `SUM` 行的 `comment` 和 `code`：
+  `cloc . --fullpath --not-match-d='/(build[^/]*|3rdpty/sources|3rdpty/prebuilts)(/|$)' --include-lang='C,C++,C/C++ Header,CMake' --csv`。
+- 注释必须解释契约、不变量、线程、生命周期、平台差异或构建理由；
+  禁止用无意义逐行复述、空注释或生成文件凑比例。
+- 禁止在文件开头集中堆放说明来提高比例；注释必须贴近其约束的类型、函数、
+  关键逻辑、状态转折、平台分支或 CMake target/条件。
+- 新增自维护源码目录时必须确认上述命令仍覆盖它；提交前重新统计，
+  低于门槛时不得提交。
 
 ## 架构方向
 
