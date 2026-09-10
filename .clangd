@@ -1,0 +1,9 @@
+CompileFlags:
+    Add:
+        - -Wno-unknown-warning-option
+        - -Wno-unused-command-line-argument
+    Remove:
+        - -mno-direct-extern-access
+        - -fdeps-format=p1689r5
+        - -fmodule-mapper=*
+        - -fmodules-ts

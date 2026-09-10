@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AudioRoads
+Comment=Route and mix audio devices
+Exec=AudioRoads
+Icon=io.github.xiangcao233.audioroads
+Categories=AudioVideo;Audio;
+Terminal=false

@@ -1,0 +1,8 @@
+[submodule "3rdpty/sources/glfw"]
+	path = 3rdpty/sources/glfw
+	url = https://github.com/glfw/glfw.git
+	branch = master
+[submodule "3rdpty/sources/imgui"]
+	path = 3rdpty/sources/imgui
+	url = https://github.com/ocornut/imgui.git
+	branch = docking

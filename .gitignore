@@ -1,0 +1,10 @@
+*build/
+*build*/
+build/
+.cache/
+.vscode/
+.idea/
+release/
+*__pycache__/
+
+.DS_Store
