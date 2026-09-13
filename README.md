@@ -6,16 +6,17 @@ AudioRoads 是一款面向 Windows、现代 Linux（PipeWire）和 macOS 的桌�
 连线；多条连接汇入同一目标时完成混音，每条连接独立控制增益和静音。
 
 当前仓库已经具备可运行的客户端外壳、三平台物理端点枚举、应用输出来源发现、
-节点连线 UI、无分配混音内核及无锁 SPSC 音频缓冲。实际平台流的打开、重采样、
-虚拟端点组件和实时路由调度仍在实现中，因此当前版本不会宣称画布连接已经送入
-声卡或被其他软件识别为麦克风。
+节点连线 UI、无分配混音内核及无锁 SPSC 音频缓冲。Linux PipeWire 后端已经可以
+把物理输入或应用输出路由到指定物理播放设备，并实时响应每条连接的增益和静音。
+Windows/macOS 实际平台流、长期跨设备时钟漂移校正及三平台虚拟麦克风组件仍在
+实现中。
 
 ## 平台后端
 
 | 平台 | 原生接口 | 当前能力 |
 | --- | --- | --- |
 | Windows | MMDevice / WASAPI | 活动设备及音频会话发现；后续用 application loopback 捕获进程树 |
-| Linux | PipeWire 0.3 | 设备节点及 `Stream/Output/Audio` 应用流发现 |
+| Linux | PipeWire 0.3 | 端点/应用流发现；来源到指定物理播放设备的实时路由与混音 |
 | macOS | CoreAudio HAL | 设备及运行中输出进程发现；要求 macOS 14.2+ |
 
 三个后端都只向上层暴露 `AudioSource`、`AudioTarget` 值类型；原生句柄不会进入

@@ -11,6 +11,9 @@ namespace AudioRoads::UI
 struct MainViewActions {
     /// @brief 用户是否要求重新发现音频来源与目标。
     bool refreshEndpoints{};
+
+    /// @brief 当前帧是否成功修改了路由拓扑、增益或静音状态。
+    bool routingChanged{};
 };
 
 /// @brief 绘制端点节点画布、连接线和路由参数面板。

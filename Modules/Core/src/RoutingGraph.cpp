@@ -13,6 +13,7 @@ void RoutingGraph::replaceEndpoints(AudioEndpointSnapshot snapshot)
     // 路由只保存 ID，因此端点暂时消失时仍保留用户配置。
     m_sources = std::move(snapshot.sources);
     m_targets = std::move(snapshot.targets);
+    ++m_revision;
 }
 
 const std::vector<AudioSource>& RoutingGraph::sources() const noexcept
@@ -31,6 +32,12 @@ const std::vector<AudioRoute>& RoutingGraph::routes() const noexcept
 {
     // 路由顺序同时作为 UI 稳定展示顺序，不按在线状态或增益隐式重排。
     return m_routes;
+}
+
+std::uint64_t RoutingGraph::revision() const noexcept
+{
+    // 版本只在串行控制面读写；实时线程不得直接观察 RoutingGraph。
+    return m_revision;
 }
 
 std::expected<RouteId, RoutingError> RoutingGraph::createRoute(
@@ -67,6 +74,7 @@ std::expected<RouteId, RoutingError> RoutingGraph::createRoute(
                                    .targetId = std::move(targetId),
                                    .gain     = gain,
                                    .muted    = false });
+    ++m_revision;
     return id;
 }
 
@@ -88,6 +96,7 @@ std::expected<void, RoutingError> RoutingGraph::updateRoute(RouteId id,
     // 端点不可通过 update 改写，确保所有连接变化重新经过完整存在性校验。
     route->gain  = gain;
     route->muted = muted;
+    ++m_revision;
     return {};
 }
 
@@ -97,7 +106,9 @@ bool RoutingGraph::removeRoute(RouteId id) noexcept
     // erase_if 保留其他路由的相对顺序；ID 唯一性保证最多删除一个元素。
     std::erase_if(m_routes,
                   [id](const AudioRoute& route) { return route.id == id; });
-    return m_routes.size() != oldSize;
+    const auto removed = m_routes.size() != oldSize;
+    if ( removed ) ++m_revision;
+    return removed;
 }
 
 const AudioSource* RoutingGraph::findSource(

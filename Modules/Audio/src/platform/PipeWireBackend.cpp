@@ -1,9 +1,12 @@
 #include "IAudioBackend.h"
+#include "PipeWireRoutingEngine.h"
 
 #include <pipewire/keys.h>
 #include <pipewire/pipewire.h>
 
 #include <spa/utils/dict.h>
+
+#include <unistd.h>
 
 #include <algorithm>
 #include <charconv>
@@ -35,6 +38,9 @@ struct EnumerationState {
 
     /// @brief 完整 registry 事件转换出的来源与目标快照。
     Core::AudioEndpointSnapshot endpoints;
+
+    /// @brief 聚合应用来源到本轮原生节点 serial 的控制面映射。
+    std::vector<PipeWireSourceBinding> sourceBindings;
 
     /// @brief 服务端异步错误；非空时枚举失败。
     /// @note 由同一 pw_main_loop 线程写入，枚举返回后才由控制线程读取。
@@ -116,6 +122,13 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
     const auto appBinary   = property(properties, PW_KEY_APP_PROCESS_BINARY);
     const auto processId =
         parseUnsigned(property(properties, PW_KEY_APP_PROCESS_ID));
+    // AudioRoads 自己的 playback stream 也属于
+    // Stream/Output/Audio；若刷新后把它
+    // 暴露为可选来源，用户可能把输出重新接回同一目标形成实时反馈环。
+    if ( isApplicationOutput &&
+         processId == static_cast<std::uint32_t>(::getpid()) ) {
+        return;
+    }
 
     std::string displayName;
     // 可读名称逐级降级；最后使用本次 registry ID，保证 UI 永远有非空标签。
@@ -175,7 +188,18 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
                                 : !appName.empty() ? std::string{ appName }
                                                    : nativeId;
     // 类别前缀把应用流与同名物理设备隔离，也给后续开流分派提供无歧义入口。
-    const auto sourceId  = "pipewire:application:" + applicationKey;
+    const auto sourceId = "pipewire:application:" + applicationKey;
+    // 路由执行不能用应用 binary/name 直接填写 target.object；保留每个当前节点的
+    // object.serial，并在同步时为聚合来源分别建立采集流。
+    const auto existingBinding = std::ranges::find_if(
+        state.sourceBindings, [&](const PipeWireSourceBinding& binding) {
+            return binding.sourceId == sourceId &&
+                   binding.targetObject == nativeId;
+        });
+    if ( existingBinding == state.sourceBindings.end() ) {
+        state.sourceBindings.push_back(PipeWireSourceBinding{
+            .sourceId = sourceId, .targetObject = nativeId });
+    }
     const auto duplicate = std::ranges::find(
         state.endpoints.sources, sourceId, &Core::AudioSource::id);
     if ( duplicate != state.endpoints.sources.end() ) {
@@ -247,12 +271,17 @@ class PipeWireBackend final : public IAudioBackend
 {
 public:
     /// @brief 初始化当前进程的 PipeWire 客户端支持。
-    PipeWireBackend() { pw_init(nullptr, nullptr); }
+    PipeWireBackend()
+    {
+        pw_init(nullptr, nullptr);
+        m_routingEngine = std::make_unique<PipeWireRoutingEngine>();
+    }
 
     /// @brief 平衡构造阶段的全局初始化。
     ~PipeWireBackend() override
     {
-        // 全部单次枚举对象已在调用结束前销毁，最后才能平衡进程级初始化。
+        // 实时流必须先停止并释放所有 PipeWire 对象，最后才能平衡全局初始化。
+        m_routingEngine.reset();
         pw_deinit();
     }
 
@@ -264,6 +293,20 @@ public:
     /// @brief 完成一次 registry 同步边界内的来源与目标发现。
     [[nodiscard]] std::expected<Core::AudioEndpointSnapshot, AudioBackendError>
     enumerateEndpoints() override;
+
+    /// @brief 将当前在线稳定 ID 解析为 PipeWire target.object 并同步实时流。
+    [[nodiscard]] std::expected<void, AudioBackendError> synchronizeRouting(
+        const Core::RoutingGraph& graph) override
+    {
+        return m_routingEngine->synchronize(graph, m_sourceBindings);
+    }
+
+private:
+    /// @brief 当前枚举快照中的聚合应用来源原生节点映射。
+    std::vector<PipeWireSourceBinding> m_sourceBindings;
+
+    /// @brief 必须在 pw_deinit 前销毁的实时路由执行器。
+    std::unique_ptr<PipeWireRoutingEngine> m_routingEngine;
 };
 
 std::expected<Core::AudioEndpointSnapshot, AudioBackendError>
@@ -310,11 +353,13 @@ PipeWireBackend::enumerateEndpoints()
 
     // state 必须声明在 hooks 之前并活到清理结束，确保所有 listener 的 userData
     // 在可能发生回调的整个期间保持有效。
-    EnumerationState state{
-        .loop = loop, .syncSequence = 0, .endpoints = {}, .error = {}
-    };
-    spa_hook registryListener{};
-    spa_hook coreListener{};
+    EnumerationState state{ .loop           = loop,
+                            .syncSequence   = 0,
+                            .endpoints      = {},
+                            .sourceBindings = {},
+                            .error          = {} };
+    spa_hook         registryListener{};
+    spa_hook         coreListener{};
     // events 结构必须零初始化，未使用函数指针保持空值而不是未定义字节。
     pw_registry_events registryEvents{};
     registryEvents.version = PW_VERSION_REGISTRY_EVENTS;
@@ -359,6 +404,7 @@ PipeWireBackend::enumerateEndpoints()
     }
     // 每个 DTO 都拥有自身字符串；移动容器后不依赖已销毁的 registry 状态。
     // 此时 listener 已移除且所有原生对象已销毁，返回值只包含 Core 值类型。
+    m_sourceBindings = std::move(state.sourceBindings);
     return std::move(state.endpoints);
 }
 

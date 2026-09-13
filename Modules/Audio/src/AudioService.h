@@ -32,6 +32,10 @@ public:
     /// 该操作可能同步访问系统服务，禁止从实时回调调用。
     [[nodiscard]] std::expected<void, AudioBackendError> refreshEndpoints();
 
+    /// @brief 把当前路由图同步到平台流执行层。
+    /// @details 仅在 UI 帧结束或端点快照刷新后调用，避免平台操作进入绘制栈。
+    [[nodiscard]] std::expected<void, AudioBackendError> synchronizeRouting();
+
     /// @brief 返回平台后端名称。
     /// @note 该值只用于诊断展示，不能驱动业务分支。
     [[nodiscard]] const char* backendName() const noexcept;

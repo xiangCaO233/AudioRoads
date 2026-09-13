@@ -16,6 +16,7 @@ using AudioRoads::Core::RoutingGraph;
 int main()
 {
     RoutingGraph graph;
+    assert(graph.revision() == 0);
     // 测试快照同时覆盖两种来源和两种目标，确保图约束不依赖平台设备方向。
     AudioEndpointSnapshot endpoints{
         .sources =
@@ -56,6 +57,8 @@ int main()
             },
     };
     graph.replaceEndpoints(std::move(endpoints));
+    const auto endpointRevision = graph.revision();
+    assert(endpointRevision != 0);
     // replace 后快照所有权已进入 graph，后续断言只观察图内拥有型值。
     assert(graph.sources().size() == 2);
     assert(graph.targets().size() == 2);
@@ -64,6 +67,7 @@ int main()
     const auto playback =
         graph.createRoute("application:player", "device:speakers", 0.75F);
     assert(playback.has_value());
+    assert(graph.revision() > endpointRevision);
     assert(*playback != 0);
     // 第一条路由从应用方块连接播放目标，并保留用户提交的线性增益。
     assert(graph.routes().front().gain == 0.75F);
@@ -79,6 +83,7 @@ int main()
     assert(graph.routes().back().sourceId == "device:microphone");
     assert(graph.routes().back().targetId == "virtual:microphone");
 
+    const auto revisionBeforeRejectedRoute = graph.revision();
     const auto duplicate =
         graph.createRoute("application:player", "device:speakers");
     // 重复定义按端点有序对判断，与增益是否不同无关。
@@ -86,6 +91,8 @@ int main()
     assert(duplicate.error() == RoutingError::DuplicateRoute);
     // 失败不消耗 ID 或追加半成品，路由数量必须保持不变。
     assert(graph.routes().size() == 2);
+    // 失败操作没有改变控制面，不能触发一次无意义的平台停流重建。
+    assert(graph.revision() == revisionBeforeRejectedRoute);
 
     const auto missingTarget =
         graph.createRoute("application:player", "missing");
@@ -99,8 +106,10 @@ int main()
     assert(graph.routes().size() == 2);
     // 离线路由仍可通过自身 RouteId 删除，操作不要求两端当前可发现。
     assert(graph.removeRoute(*playback));
+    const auto revisionAfterRemoval = graph.revision();
     assert(graph.removeRoute(*microphone));
     assert(graph.routes().empty());
+    assert(graph.revision() > revisionAfterRemoval);
     // 删除完毕后图保持可复用，nextRouteId 不回退也不会与旧 UI 动作冲突。
     return 0;
 }

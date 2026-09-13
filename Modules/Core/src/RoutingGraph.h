@@ -73,6 +73,11 @@ public:
     /// @warning 引用及其元素只在下次创建或删除路由前保持有效。
     [[nodiscard]] const std::vector<AudioRoute>& routes() const noexcept;
 
+    /// @brief 返回控制面拓扑或参数最近一次成功修改后的单调版本号。
+    /// @details 端点快照替换、路由创建、参数更新和删除都会推进版本；失败操作
+    /// 不推进。UI 可在单帧前后比较该值，把平台流同步延迟到绘制结束之后。
+    [[nodiscard]] std::uint64_t revision() const noexcept;
+
     /// @brief 在来源与数据消费目标之间创建有向路由。
     /// @details 依次校验增益、来源存在性、目标存在性及端点对唯一性；
     /// 任一失败都不修改图，也不消耗新路由 ID。
@@ -111,6 +116,9 @@ private:
 
     /// @brief 按创建顺序保存的纯数据流路由配置。
     std::vector<AudioRoute> m_routes;
+
+    /// @brief 控制面状态版本；零表示对象刚构造且尚未提交任何快照。
+    std::uint64_t m_revision{};
 };
 
 /// @brief 将错误枚举转换为面向 UI 的简短中文文本。

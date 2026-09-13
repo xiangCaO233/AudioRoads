@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AudioTypes.h"
+#include "RoutingGraph.h"
 
 #include <expected>
 #include <string>
@@ -55,6 +55,20 @@ public:
     [[nodiscard]] virtual std::expected<Core::AudioEndpointSnapshot,
                                         AudioBackendError>
     enumerateEndpoints() = 0;
+
+    /// @brief 把当前控制面路由同步到平台实时流。
+    /// @details UI 完成一帧修改或端点刷新后调用；实现必须在返回前完成流对象
+    /// 的安全切换。实时回调只能观察预分配状态，不能借用 RoutingGraph。
+    /// 默认实现只接受空路由，使尚未接入实时流的平台明确拒绝伪连接。
+    [[nodiscard]] virtual std::expected<void, AudioBackendError>
+    synchronizeRouting(const Core::RoutingGraph& graph)
+    {
+        if ( graph.routes().empty() ) return {};
+        return std::unexpected(AudioBackendError{
+            .operation = "同步音频路由",
+            .message   = "当前平台后端尚未实现实时音频流",
+        });
+    }
 };
 
 }  // namespace AudioRoads::Audio

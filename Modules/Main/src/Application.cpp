@@ -26,7 +26,17 @@ int Application::run()
 
         // 平台枚举可能执行同步 round-trip，只在帧提交后响应显式动作。
         if ( actions.refreshEndpoints ) refreshEndpoints();
-        // 没有动作时循环只处理渲染与输入，不进行隐式周期性平台枚举。
+        if ( actions.routingChanged ) {
+            // 路由修改已经离开 ImGui 栈，再由 Audio 层安全切换实时流对象。
+            auto synchronized = m_audioService.synchronizeRouting();
+            if ( !synchronized ) {
+                m_mainView.setError(synchronized.error().operation + ": " +
+                                    synchronized.error().message);
+            } else {
+                m_mainView.setError({});
+            }
+        }
+        // 没有动作时循环只处理渲染与输入，不进行隐式周期性平台操作。
     }
     // 正常关闭仅结束循环；栈上成员随后按视图、窗口、音频服务的逆序销毁。
     return 0;
@@ -42,8 +52,16 @@ void Application::refreshEndpoints()
         m_mainView.setError(refreshed.error().operation + ": " +
                             refreshed.error().message);
     } else {
-        // 成功快照替换意味着旧故障已恢复，不能继续展示过期错误。
-        m_mainView.setError({});
+        // 刷新可能改变应用流实例或让离线设备恢复，必须以同一稳定 ID
+        // 重建执行层。
+        auto synchronized = m_audioService.synchronizeRouting();
+        if ( !synchronized ) {
+            m_mainView.setError(synchronized.error().operation + ": " +
+                                synchronized.error().message);
+        } else {
+            // 快照和执行层均成功后才清除旧故障，避免蓝线再次成为静态假连接。
+            m_mainView.setError({});
+        }
     }
 }
 

@@ -36,6 +36,17 @@ std::expected<void, AudioBackendError> AudioService::refreshEndpoints()
     return {};
 }
 
+std::expected<void, AudioBackendError> AudioService::synchronizeRouting()
+{
+    // 路由执行与枚举共用同一后端寿命；空注入仍沿标准错误通道返回。
+    if ( !m_backend ) {
+        return std::unexpected(AudioBackendError{ .operation = "同步音频路由",
+                                                  .message = "平台后端为空" });
+    }
+    // 后端必须复制或预构建实时状态，返回后不得继续借用控制面图对象。
+    return m_backend->synchronizeRouting(m_routingGraph);
+}
+
 const char* AudioService::backendName() const noexcept
 {
     // 空后端仍提供稳定标签，使诊断 UI 不必复制空值判断。

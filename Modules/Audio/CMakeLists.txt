@@ -14,7 +14,8 @@ elseif(UNIX)
     find_package(PkgConfig REQUIRED)
     # REQUIRED 保证产品模式缺失 PipeWire 时不生成假后端。
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-    set(AUDIOROADS_AUDIO_PLATFORM_SOURCE src/platform/PipeWireBackend.cpp)
+    set(AUDIOROADS_AUDIO_PLATFORM_SOURCE src/platform/PipeWireBackend.cpp
+                                         src/platform/PipeWireRoutingEngine.cpp)
   else()
     # 不可用后端会显式报错，禁止静默回退 ALSA 或伪造设备。
     set(AUDIOROADS_AUDIO_PLATFORM_SOURCE src/platform/UnavailableBackend.cpp)
@@ -50,8 +51,8 @@ elseif(APPLE)
                                                 "${AUDIOROADS_CORE_FOUNDATION}")
 else()
   if(AUDIOROADS_ENABLE_PIPEWIRE)
-    # 可用性宏与 imported target 在同一条件内，避免“编译了实现但未链接库”或
-    # “工厂选择 PipeWire 但实际编译不可用后端”的单边配置。
+    # 可用性宏与 imported target 在同一条件内，避免“编译了实现但未链接库”或 “工厂选择 PipeWire
+    # 但实际编译不可用后端”的单边配置。
     target_link_libraries(AudioRoadsAudio PRIVATE PkgConfig::PIPEWIRE)
     target_compile_definitions(AudioRoadsAudio
                                PRIVATE AUDIOROADS_HAS_PIPEWIRE=1)

@@ -243,7 +243,7 @@ void drawRoutingCanvas(Core::RoutingGraph& graph, std::string& pendingSourceId,
                           NODE_WIDTH - 24.0F);
         // 入边计数直接说明目标承担混音汇聚；无需额外创建只作展示的 mixer 对象。
         const auto routeCount = incomingRouteCount(graph, target.id);
-        const auto detail     = std::string{ targetKindName(target.kind) } +
+        const auto detail = std::string{ targetKindName(target.kind) } +
                             "  Mix " + std::to_string(routeCount) + " inputs";
         drawList->AddText(screenPoint(topLeft, 12.0F, 58.0F),
                           IM_COL32(174, 186, 203, 255),
@@ -293,6 +293,7 @@ MainViewActions MainView::draw(Core::RoutingGraph& graph,
 {
     // 绘制路径只编辑内存图；应用捕获、设备创建和流启动必须作为帧外动作执行。
     MainViewActions actions;
+    const auto      routingRevision = graph.revision();
     normalizePendingConnection(graph);
 
     // WorkPos/WorkSize 排除系统任务栏或菜单区域；主工作区不持久化旧显示器坐标。
@@ -368,6 +369,10 @@ MainViewActions MainView::draw(Core::RoutingGraph& graph,
     }
     // 删除动作延迟到 range-for 结束，保证本帧所有迭代器和 route 引用有效。
     if ( removeId != 0 ) static_cast<void>(graph.removeRoute(removeId));
+
+    // 版本比较覆盖画布创建、列表参数更新和删除，又不要求绘制辅助函数访问 Main
+    // 动作类型；Application 会在 endFrame 后执行可能阻塞的平台同步。
+    actions.routingChanged = graph.revision() != routingRevision;
 
     ImGui::End();
     return actions;

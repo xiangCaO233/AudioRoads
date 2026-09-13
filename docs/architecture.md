@@ -26,11 +26,12 @@ Main -> UI -----> Core
 
 设备流实现按以下顺序扩展，不改变现有 UI 和路由图接口：
 
-1. `IAudioBackend` 增加异步端点变更通知和按稳定 ID 打开 capture/render stream。
-2. 每个 source 只有一个原生采集流，写入预分配的 `SpscAudioRingBuffer`。
-3. 每个 target 只有一个消费回调，从所有关联 source 的环形缓冲读取数据。
+1. `IAudioBackend` 按稳定 ID 打开 capture/render stream，并继续增加异步端点通知。
+2. 每个 source 只有一个原生采集流，每条扇出边拥有独立的
+   `SpscAudioRingBuffer`。
+3. 每个 target 只有一个消费回调，从所有关联 route 的环形缓冲读取数据。
 4. 不同设备时钟域之间使用占用量反馈驱动的重采样，禁止用 sleep 或阻塞锁对齐。
-5. 通道矩阵、路由增益和静音以不可变快照原子切换；音频回调不复制共享所有权。
+5. 路由增益和静音以无锁原子切换；后续通道矩阵使用不可变执行快照。
 6. `mixAudio` 负责最终汇总和限幅，回调中的所有工作区在启动流前完成分配。
 
 Windows 使用事件驱动 WASAPI 与 application loopback，Linux 使用 `pw_stream` 和
@@ -49,6 +50,8 @@ PipeWire 实时 process 回调，macOS 使用 CoreAudio IOProc 与 process tap�
 ## 当前交付边界
 
 当前阶段已经验证路由图不变量、块混音算法、无锁 SPSC 缓冲和 Linux PipeWire
-产品构建。三平台应用输出发现已落到各自编译分支，但 Windows/macOS 尚未在对应
-主机编译，原生捕获/播放流与虚拟麦克风组件也尚未接通。后续验收必须继续区分
-“发现端点”“建立数据流”“系统识别虚拟设备”三个证据层级。
+产品构建。Linux 已接通物理输入/应用输出到指定物理播放目标的 `pw_stream` 实时
+路由：拓扑变化安全重建流，参数变化无锁发布，多条入边在单个目标回调混音。
+Windows/macOS 尚未在对应主机接通原生流，虚拟麦克风组件及长期跨设备时钟漂移
+校正也尚未完成。后续验收必须继续区分“发现端点”“建立数据流”“系统识别虚拟
+设备”三个证据层级。
