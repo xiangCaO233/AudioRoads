@@ -1,5 +1,6 @@
 #include "IAudioBackend.h"
 #include "PipeWireRoutingEngine.h"
+#include "PipeWireVirtualMicrophone.h"
 
 #include <pipewire/keys.h>
 #include <pipewire/pipewire.h>
@@ -85,7 +86,8 @@ struct EnumerationState {
 
 /// @brief 接收 registry global 并分类设备端点与桌面应用输出流。
 ///
-/// Audio/Source 和 Audio/Sink 分别成为设备来源与播放目标；
+/// Audio/Source 和 Audio/Sink 分别成为设备来源与播放目标；AudioRoads 自己
+/// 发布的 Audio/Source 改为虚拟麦克风目标，不能再次作为来源形成反馈环。
 /// Stream/Output/Audio 按应用身份聚合为应用输出来源。其他过滤器和 monitor
 /// 等内部节点不暴露给用户。回调不保留任何原生代理。
 /// @param userData 指向本次枚举栈上的 EnumerationState，listener 移除前有效。
@@ -122,6 +124,25 @@ void onRegistryGlobal(void* userData, std::uint32_t id, std::uint32_t,
     const auto appBinary   = property(properties, PW_KEY_APP_PROCESS_BINARY);
     const auto processId =
         parseUnsigned(property(properties, PW_KEY_APP_PROCESS_ID));
+
+    if ( isDeviceInput &&
+         nodeName == PIPEWIRE_VIRTUAL_MICROPHONE_SOURCE_NODE ) {
+        // 系统视角的录音 Source 在 AudioRoads 图中是消费混音的 target。稳定 ID
+        // 与本轮 object.serial 解耦，路由执行层会定向到配套的内部输入流。
+        const auto channels =
+            parseUnsigned(property(properties, "audio.channels"));
+        const auto rate = parseUnsigned(property(properties, "audio.rate"));
+        state.endpoints.targets.push_back(Core::AudioTarget{
+            .id         = std::string{ PIPEWIRE_VIRTUAL_MICROPHONE_TARGET_ID },
+            .name       = "AudioRoads Virtual Microphone",
+            .backend    = "PipeWire",
+            .kind       = Core::AudioTargetKind::VirtualMicrophone,
+            .channels   = channels == 0U ? 2U : channels,
+            .sampleRate = rate == 0U ? 48'000U : rate,
+            .isDefault  = false,
+        });
+        return;
+    }
     // AudioRoads 自己的 playback stream 也属于
     // Stream/Output/Audio；若刷新后把它
     // 暴露为可选来源，用户可能把输出重新接回同一目标形成实时反馈环。
@@ -274,7 +295,8 @@ public:
     PipeWireBackend()
     {
         pw_init(nullptr, nullptr);
-        m_routingEngine = std::make_unique<PipeWireRoutingEngine>();
+        m_virtualMicrophone = std::make_unique<PipeWireVirtualMicrophone>();
+        m_routingEngine     = std::make_unique<PipeWireRoutingEngine>();
     }
 
     /// @brief 平衡构造阶段的全局初始化。
@@ -282,6 +304,7 @@ public:
     {
         // 实时流必须先停止并释放所有 PipeWire 对象，最后才能平衡全局初始化。
         m_routingEngine.reset();
+        m_virtualMicrophone.reset();
         pw_deinit();
     }
 
@@ -305,6 +328,9 @@ private:
     /// @brief 当前枚举快照中的聚合应用来源原生节点映射。
     std::vector<PipeWireSourceBinding> m_sourceBindings;
 
+    /// @brief 后端存活期间保持系统可见 Source 与内部注入流稳定在线。
+    std::unique_ptr<PipeWireVirtualMicrophone> m_virtualMicrophone;
+
     /// @brief 必须在 pw_deinit 前销毁的实时路由执行器。
     std::unique_ptr<PipeWireRoutingEngine> m_routingEngine;
 };
@@ -312,6 +338,12 @@ private:
 std::expected<Core::AudioEndpointSnapshot, AudioBackendError>
 PipeWireBackend::enumerateEndpoints()
 {
+    // 先发布节点再取得 registry
+    // 快照，使首帧即可把真实在线的虚拟麦克风列为目标。
+    // 发布失败必须显式返回，不能展示一块实际不存在、无法被其他应用打开的目标。
+    auto published = m_virtualMicrophone->ensurePublished();
+    if ( !published ) return std::unexpected(std::move(published.error()));
+
     // 每次刷新使用独立对象树，调用结束后不缓存任何 pw_proxy 或 spa 指针。
     // 早退分支按已成功创建资源的逆序释放；后续若增加资源需保持同一不变量。
     auto* loop = pw_main_loop_new(nullptr);

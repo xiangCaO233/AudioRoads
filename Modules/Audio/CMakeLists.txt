@@ -14,8 +14,9 @@ elseif(UNIX)
     find_package(PkgConfig REQUIRED)
     # REQUIRED 保证产品模式缺失 PipeWire 时不生成假后端。
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-    set(AUDIOROADS_AUDIO_PLATFORM_SOURCE src/platform/PipeWireBackend.cpp
-                                         src/platform/PipeWireRoutingEngine.cpp)
+    set(AUDIOROADS_AUDIO_PLATFORM_SOURCE
+        src/platform/PipeWireBackend.cpp src/platform/PipeWireRoutingEngine.cpp
+        src/platform/PipeWireVirtualMicrophone.cpp)
   else()
     # 不可用后端会显式报错，禁止静默回退 ALSA 或伪造设备。
     set(AUDIOROADS_AUDIO_PLATFORM_SOURCE src/platform/UnavailableBackend.cpp)

@@ -33,9 +33,11 @@
   解析当前匹配节点，不能依赖短生命周期 registry ID。
 - 物理来源和聚合应用来源已经通过定向 capture `pw_stream` 接入；每个原生来源只
   打开一次，并向每条出边的独立 SPSC 缓冲扇出统一的双声道 float32 PCM。
-- 虚拟麦克风由 AudioRoads 创建 `Audio/Source` 节点并在 `pw_stream` process 回调
-  中提交混音块，不需要内核驱动。节点寿命默认跟随客户端，后续可由用户服务托管
-  获得跨 UI 重启的持久性。
+- 虚拟麦克风由 AudioRoads 加载 PipeWire loopback 模块：公开的 `Audio/Source`
+  节点供其他应用当作录音设备，关闭自动连接的内部 `Stream/Input/Audio` 只接收
+  AudioRoads 的目标混音 playback。节点对在后端寿命内常驻，增删路由不会让正在
+  录音的应用丢失设备；不需要内核驱动，后续可由用户服务托管获得跨 UI 重启的
+  持久性。
 - 物理目标是普通 `Audio/Sink`，当前已由唯一 playback 回调持续拉取全部入边、
   应用连接增益/静音并播放混音结果。PipeWire 负责 48 kHz 双声道引擎格式与设备
   原生格式之间的基础转换；长期跨硬件时钟漂移校正仍需后续占用量反馈重采样。

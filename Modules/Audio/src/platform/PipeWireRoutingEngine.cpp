@@ -1,4 +1,5 @@
 #include "PipeWireRoutingEngine.h"
+#include "PipeWireVirtualMicrophone.h"
 
 #include "Mixer.h"
 #include "SpscAudioRingBuffer.h"
@@ -407,7 +408,7 @@ struct PipeWireRoutingEngine::Implementation {
 
     /// @brief 过滤离线端点并将稳定 Core ID 展开为当前原生节点组合。
     /// @details 物理端点从类别后缀取 serial；应用来源使用枚举缓存，允许一条
-    /// 用户路由展开成多个原生采集流。虚拟麦克风在本阶段返回明确错误。
+    /// 用户路由展开成多个原生采集流。虚拟麦克风映射到常驻模块的内部输入流。
     [[nodiscard]] std::expected<std::vector<NativeRoute>, AudioBackendError>
     resolveRoutes(const Core::RoutingGraph&              graph,
                   std::span<const PipeWireSourceBinding> sourceBindings) const;
@@ -445,16 +446,17 @@ PipeWireRoutingEngine::Implementation::resolveRoutes(
         const auto* target = graph.findTarget(route.targetId);
         // 离线端点的配置仍留在 Core，但执行层不建立会误连默认设备的流。
         if ( source == nullptr || target == nullptr ) continue;
-        if ( target->kind != Core::AudioTargetKind::DeviceOutput ) {
-            // 返回错误而非创建普通播放节点冒充系统可见录音设备。
-            return std::unexpected(
-                routingError("Linux 虚拟麦克风目标尚未实现"));
+        std::string_view targetObject;
+        if ( target->kind == Core::AudioTargetKind::DeviceOutput ) {
+            targetObject = nativeObject(target->id, DEVICE_OUTPUT_PREFIX);
+        } else if ( target->id == PIPEWIRE_VIRTUAL_MICROPHONE_TARGET_ID ) {
+            // 虚拟麦克风公开端由常驻 loopback 所有；路由播放流只连接其隐藏的
+            // Stream/Input/Audio 端，因此编辑线路不会断开外部录音客户端。
+            targetObject = PIPEWIRE_VIRTUAL_MICROPHONE_INPUT_NODE;
         }
-        const auto targetObject =
-            nativeObject(target->id, DEVICE_OUTPUT_PREFIX);
         // 类型前缀不匹配通常意味着跨后端 DTO 被错误传入，应阻止自动连接。
         if ( targetObject.empty() ) {
-            return std::unexpected(routingError("无法解析播放设备稳定 ID"));
+            return std::unexpected(routingError("无法解析音频目标稳定 ID"));
         }
 
         if ( source->kind == Core::AudioSourceKind::DeviceInput ) {
